@@ -9,19 +9,21 @@ flags: CpuFlags,
 
 const Cpu = @This();
 
-pub const CpuFlags = struct {
+pub const CpuFlags = packed struct(u8) {
     negative: bool,
     zero: bool,
     carry: bool,
     interrupt_disbale: bool,
     decimal: bool,
     overflow: bool,
+    _padding: u2,
 };
 
-const OpCode = enum(u8) {
-    JMP_abs = 0x4C,
-    _,
-};
+pub fn reset(cpu: *Cpu) void {
+    cpu.pc = 0xC000;
+    cpu.sp = 0xFD;
+    cpu.flags.interrupt_disbale = true;
+}
 
 pub fn fetchByte(cpu: *Cpu, memory: []u8) u8 {
     const result = memory[cpu.pc];
@@ -29,24 +31,128 @@ pub fn fetchByte(cpu: *Cpu, memory: []u8) u8 {
     return result;
 }
 
-pub fn fetchTwoBytes(cpu: *Cpu, memory: []u8) u16 {
-    const first = fetchByte(cpu, memory);
-    const second = fetchByte(cpu, memory);
-    var result: u16 = second;
+fn combineTwoBytes(lower: u8, higher: u8) u16 {
+    var result: u16 = higher;
     result <<= 8;
-    result += first;
+    result += lower;
     return result;
 }
 
+pub fn fetchTwoBytes(cpu: *Cpu, memory: []u8) u16 {
+    const first = fetchByte(cpu, memory);
+    const second = fetchByte(cpu, memory);
+    return combineTwoBytes(first, second);
+}
+
+pub fn readByte(memory: []u8, address: u16) u8 {
+    return memory[address];
+}
+
+pub fn writeByte(memory: []u8, address: u16, byte: u8) void {
+    memory[address] = byte;
+}
+
+fn push_byte(cpu: *Cpu, memory: []u8, byte: u8) void {
+    const stack_start: u16 = 0x0100 + @as(u16, @intCast(cpu.sp));
+    writeByte(memory, stack_start, byte);
+    cpu.sp -%= 1; // wrap around ??
+}
+
+fn pull_byte(cpu: *Cpu, memory: []u8) u8 { // we know in our heart it's pop()
+    cpu.sp +%= 1; // wrap around ??
+    const stack_start: u16 = 0x0100 + @as(u16, @intCast(cpu.sp));
+    return readByte(memory, stack_start);
+}
+
+const OpCode = enum(u8) {
+    CLC = 0x18, // Clear Carry Flag
+    JSR = 0x20, // Jump to Subroutine
+    SEC = 0x38, // Set Carry Flag
+    CLI = 0x58, // Clear Interrupt Disable Flag
+    RTS = 0x60, // Return from Subroutine
+    JMP_abs = 0x4C,
+    SEI = 0x78, // Set Interrupt Disable Flag
+    STX_zero_page = 0x86,
+    NOP = 0xEA,
+    LDY_imm = 0xA0,
+    LDX_imm = 0xA2,
+    BCS = 0xB0, // Branch if Carry Set
+    CLV = 0xB8, // Clear Overflow Flag
+    CLD = 0xD8, // Clear Decimal Flag
+    SED = 0xF8, // Set Decimal Flag
+    _,
+};
+
 pub fn execute(cpu: *Cpu, memory: []u8) !void {
+    std.log.info("PC: {x} A:{x} X:{x} Y:{x} SP:{x} P:{x}", .{
+        cpu.pc,
+        cpu.a,
+        cpu.x,
+        cpu.y,
+        cpu.sp,
+        @as(u8, @bitCast(cpu.flags)),
+    });
     const opcode: Cpu.OpCode = @enumFromInt(cpu.fetchByte(memory));
-    std.log.info("state: {} new opcode: {}", .{ cpu, opcode });
     switch (opcode) {
+        .CLC => {
+            cpu.flags.carry = false;
+        },
+        .JSR => {
+            const lower: u8 = @truncate(cpu.pc);
+            const higher: u8 = @intCast(cpu.pc >> 8);
+            push_byte(cpu, memory, lower);
+            push_byte(cpu, memory, higher);
+
+            const subroutine_addr = fetchTwoBytes(cpu, memory);
+            cpu.pc = subroutine_addr;
+        },
+        .SEC => {
+            cpu.flags.carry = true;
+        },
+        .CLI => {
+            cpu.flags.interrupt_disbale = false;
+        },
+        .RTS => {
+            const lower = pull_byte(cpu, memory);
+            const higher = pull_byte(cpu, memory);
+            cpu.pc = combineTwoBytes(lower, higher);
+        },
         .JMP_abs => {
             const result = fetchTwoBytes(cpu, memory);
             cpu.pc = result;
         },
+        .SEI => {
+            cpu.flags.interrupt_disbale = true;
+        },
+        .STX_zero_page => {
+            // todo: not sure about this one
+            const offset = fetchByte(cpu, memory);
+            writeByte(memory, offset, cpu.x);
+        },
+        .NOP => {},
+        .LDY_imm => {
+            cpu.y = fetchByte(cpu, memory);
+        },
+        .LDX_imm => {
+            cpu.x = fetchByte(cpu, memory);
+        },
+        .BCS => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (cpu.flags.carry) {
+                cpu.pc = jump_addr;
+            }
+        },
+        .CLV => {
+            cpu.flags.overflow = false;
+        },
+        .CLD => {
+            cpu.flags.decimal = false;
+        },
+        .SED => {
+            cpu.flags.decimal = true;
+        },
         else => {
+            std.log.err("Unimpl: {x}", .{opcode});
             return error.OpcodeNotImpl;
         },
     }
