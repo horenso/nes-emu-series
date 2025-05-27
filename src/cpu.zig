@@ -6,23 +6,26 @@ y: u8,
 pc: u16,
 sp: u8,
 flags: CpuFlags,
+_cycles: u32,
 
 const Cpu = @This();
 
 pub const CpuFlags = packed struct(u8) {
-    negative: bool,
-    zero: bool,
     carry: bool,
+    zero: bool,
     interrupt_disbale: bool,
     decimal: bool,
+    b_flag: bool,
+    _always_one: bool,
     overflow: bool,
-    _padding: u2,
+    negative: bool,
 };
 
 pub fn reset(cpu: *Cpu) void {
     cpu.pc = 0xC000;
     cpu.sp = 0xFD;
     cpu.flags.interrupt_disbale = true;
+    cpu.flags._always_one = true;
 }
 
 pub fn fetchByte(cpu: *Cpu, memory: []u8) u8 {
@@ -83,15 +86,23 @@ const OpCode = enum(u8) {
     _,
 };
 
-pub fn execute(cpu: *Cpu, memory: []u8) !void {
-    std.log.info("PC: {x} A:{x} X:{x} Y:{x} SP:{x} P:{x}", .{
+pub fn status_register_u8(cpu: *Cpu) u8 {
+    return @as(u8, @bitCast(cpu.flags));
+}
+
+inline fn print(cpu: *Cpu) void {
+    std.log.info("PC: {X:04} A:{X:02} X:{X:02} Y:{X:02} SP:{X:04} P:{X:02}", .{
         cpu.pc,
         cpu.a,
         cpu.x,
         cpu.y,
         cpu.sp,
-        @as(u8, @bitCast(cpu.flags)),
+        cpu.status_register_u8(),
     });
+}
+
+pub fn execute(cpu: *Cpu, memory: []u8) !void {
+    cpu.print();
     const opcode: Cpu.OpCode = @enumFromInt(cpu.fetchByte(memory));
     switch (opcode) {
         .CLC => {
