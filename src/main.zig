@@ -36,6 +36,8 @@ test "nestest.nes" {
 
     var line_count: usize = 1;
     while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        cpu.print();
+
         {
             const expected_pc = try std.fmt.parseInt(u16, line[0..4], 16);
             std.testing.expectEqual(expected_pc, cpu.pc) catch |e| {

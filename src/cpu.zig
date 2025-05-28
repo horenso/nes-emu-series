@@ -37,8 +37,16 @@ pub fn fetchByte(cpu: *Cpu, memory: []u8) u8 {
 fn combineTwoBytes(lower: u8, higher: u8) u16 {
     var result: u16 = higher;
     result <<= 8;
-    result += lower;
+    result |= lower;
     return result;
+}
+
+const TwoBytes = struct { lower: u8, higher: u8 };
+
+fn splitBytes(value: u16) TwoBytes {
+    const lower: u8 = @truncate(value);
+    const higher: u8 = @intCast(value >> 8);
+    return .{ .lower = lower, .higher = higher };
 }
 
 pub fn fetchTwoBytes(cpu: *Cpu, memory: []u8) u16 {
@@ -58,30 +66,46 @@ pub fn writeByte(memory: []u8, address: u16, byte: u8) void {
 fn push_byte(cpu: *Cpu, memory: []u8, byte: u8) void {
     const stack_start: u16 = 0x0100 + @as(u16, @intCast(cpu.sp));
     writeByte(memory, stack_start, byte);
-    cpu.sp -%= 1; // wrap around ??
+    cpu.sp -%= 1;
 }
 
-fn pull_byte(cpu: *Cpu, memory: []u8) u8 { // we know in our heart it's pop()
-    cpu.sp +%= 1; // wrap around ??
+fn pop_byte(cpu: *Cpu, memory: []u8) u8 {
+    cpu.sp +%= 1;
     const stack_start: u16 = 0x0100 + @as(u16, @intCast(cpu.sp));
     return readByte(memory, stack_start);
 }
 
 const OpCode = enum(u8) {
+    PHP = 0x08, // Push Processor Status
+    BPL = 0x10, // Branch if Positive
     CLC = 0x18, // Clear Carry Flag
     JSR = 0x20, // Jump to Subroutine
+    BIT = 0x24, // Bit Test
+    PLP = 0x28, // Pull Processor Status
+    AND = 0x29, // Logical AND
+    BMI = 0x30, // Branch if Minus
     SEC = 0x38, // Set Carry Flag
+    PHA = 0x48, // Push Accumulator
+    BVC = 0x50, // Branch if Overflow Clear
     CLI = 0x58, // Clear Interrupt Disable Flag
     RTS = 0x60, // Return from Subroutine
+    PLA = 0x68, // Pull Accumulator
+    BCC = 0x90, // Branch if Carry Clear
     JMP_abs = 0x4C,
+    BVS = 0x70, // Branch if Overflow Set
     SEI = 0x78, // Set Interrupt Disable Flag
+    STA = 0x85, // Store Accumulator
     STX_zero_page = 0x86,
     NOP = 0xEA,
     LDY_imm = 0xA0,
     LDX_imm = 0xA2,
+    LDA_imm = 0xA9, // Load Accumulator
+    CMP = 0xc9, // Compare
+    BNE = 0xD0, // Branch if Not Equal
     BCS = 0xB0, // Branch if Carry Set
     CLV = 0xB8, // Clear Overflow Flag
     CLD = 0xD8, // Clear Decimal Flag
+    BEQ = 0xF0, // BEQ - Branch if Equal
     SED = 0xF8, // Set Decimal Flag
     _,
 };
@@ -90,7 +114,12 @@ pub fn status_register_u8(cpu: *Cpu) u8 {
     return @as(u8, @bitCast(cpu.flags));
 }
 
-inline fn print(cpu: *Cpu) void {
+pub fn set_status_register_from_u8(cpu: *Cpu, value: u8) void {
+    cpu.flags = @bitCast(value);
+    cpu.flags._always_one = true;
+}
+
+pub fn print(cpu: *Cpu) void {
     std.log.info("PC: {X:04} A:{X:02} X:{X:02} Y:{X:02} SP:{X:04} P:{X:02}", .{
         cpu.pc,
         cpu.a,
@@ -102,20 +131,49 @@ inline fn print(cpu: *Cpu) void {
 }
 
 pub fn execute(cpu: *Cpu, memory: []u8) !void {
-    cpu.print();
     const opcode: Cpu.OpCode = @enumFromInt(cpu.fetchByte(memory));
     switch (opcode) {
+        .PHP => {
+            // todo: no idea???
+            const value = cpu.status_register_u8() | 0b0001_0000;
+            push_byte(cpu, memory, value);
+        },
+        .PHA => {
+            push_byte(cpu, memory, cpu.a);
+        },
+        .PLP => {
+            const value = pop_byte(cpu, memory);
+            cpu.set_status_register_from_u8(value);
+        },
         .CLC => {
             cpu.flags.carry = false;
         },
         .JSR => {
-            const lower: u8 = @truncate(cpu.pc);
-            const higher: u8 = @intCast(cpu.pc >> 8);
-            push_byte(cpu, memory, lower);
-            push_byte(cpu, memory, higher);
+            const two_bytes = splitBytes(cpu.pc + 1);
+            push_byte(cpu, memory, two_bytes.higher);
+            push_byte(cpu, memory, two_bytes.lower);
 
             const subroutine_addr = fetchTwoBytes(cpu, memory);
             cpu.pc = subroutine_addr;
+        },
+        .RTS => {
+            const lower = pop_byte(cpu, memory);
+            const higher = pop_byte(cpu, memory);
+            cpu.pc = combineTwoBytes(lower, higher);
+            cpu.pc +%= 1; // HACK dunno why I need this
+        },
+        .BIT => {
+            const address: u16 = @intCast(fetchByte(cpu, memory));
+            const anded_value = readByte(memory, address) & cpu.a;
+            cpu.flags.zero = anded_value == 0;
+            cpu.flags.overflow = anded_value & 0b0100_0000 != 0;
+            cpu.flags.negative = anded_value & 0b1000_0000 != 0;
+        },
+        .AND => {
+            const value = fetchByte(cpu, memory);
+            cpu.a &= value;
+            cpu.flags.zero = cpu.a == 0;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
         },
         .SEC => {
             cpu.flags.carry = true;
@@ -123,10 +181,10 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
         .CLI => {
             cpu.flags.interrupt_disbale = false;
         },
-        .RTS => {
-            const lower = pull_byte(cpu, memory);
-            const higher = pull_byte(cpu, memory);
-            cpu.pc = combineTwoBytes(lower, higher);
+        .PLA => {
+            cpu.a = pop_byte(cpu, memory);
+            cpu.flags.zero = cpu.a == 0;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
         },
         .JMP_abs => {
             const result = fetchTwoBytes(cpu, memory);
@@ -134,6 +192,10 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
         },
         .SEI => {
             cpu.flags.interrupt_disbale = true;
+        },
+        .STA => {
+            const address: u16 = @intCast(fetchByte(cpu, memory));
+            writeByte(memory, address, cpu.a);
         },
         .STX_zero_page => {
             // todo: not sure about this one
@@ -143,16 +205,76 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
         .NOP => {},
         .LDY_imm => {
             cpu.y = fetchByte(cpu, memory);
+            cpu.flags.zero = cpu.y == 0;
+            cpu.flags.negative = cpu.y & 0b1000_0000 != 0;
         },
         .LDX_imm => {
             cpu.x = fetchByte(cpu, memory);
+            cpu.flags.zero = cpu.x == 0;
+            cpu.flags.negative = cpu.x & 0b1000_0000 != 0;
         },
+        .LDA_imm => {
+            cpu.a = fetchByte(cpu, memory);
+            cpu.flags.zero = cpu.a == 0;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
+        },
+        .CMP => {
+            const immediate_value = fetchByte(cpu, memory);
+            cpu.flags.carry = cpu.a >= immediate_value;
+            cpu.flags.zero = cpu.a == immediate_value;
+            cpu.flags.negative = (cpu.a - immediate_value) & 0b1000_0000 != 0;
+        },
+
+        // Branches
         .BCS => {
             const jump_addr = fetchByte(cpu, memory);
             if (cpu.flags.carry) {
-                cpu.pc = jump_addr;
+                cpu.pc +%= jump_addr;
             }
         },
+        .BCC => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (!cpu.flags.carry) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BEQ => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (cpu.flags.zero) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BNE => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (!cpu.flags.zero) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BVS => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (cpu.flags.overflow) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BVC => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (!cpu.flags.overflow) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BMI => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (cpu.flags.negative) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+        .BPL => {
+            const jump_addr = fetchByte(cpu, memory);
+            if (!cpu.flags.negative) {
+                cpu.pc +%= jump_addr;
+            }
+        },
+
         .CLV => {
             cpu.flags.overflow = false;
         },
