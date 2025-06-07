@@ -77,6 +77,7 @@ fn pop_byte(cpu: *Cpu, memory: []u8) u8 {
 
 const OpCode = enum(u8) {
     PHP = 0x08, // Push Processor Status
+    ORA = 0x09, // ORA - Logical Inclusive OR
     BPL = 0x10, // Branch if Positive
     CLC = 0x18, // Clear Carry Flag
     JSR = 0x20, // Jump to Subroutine
@@ -86,25 +87,32 @@ const OpCode = enum(u8) {
     BMI = 0x30, // Branch if Minus
     SEC = 0x38, // Set Carry Flag
     PHA = 0x48, // Push Accumulator
+    EOR = 0x49, // Exclusive OR
     BVC = 0x50, // Branch if Overflow Clear
     CLI = 0x58, // Clear Interrupt Disable Flag
     RTS = 0x60, // Return from Subroutine
     PLA = 0x68, // Pull Accumulator
+    ADC = 0x69, // Add with Carry
     BCC = 0x90, // Branch if Carry Clear
     JMP_abs = 0x4C,
     BVS = 0x70, // Branch if Overflow Set
     SEI = 0x78, // Set Interrupt Disable Flag
     STA = 0x85, // Store Accumulator
     STX_zero_page = 0x86,
-    NOP = 0xEA,
+    SBC = 0xE9, // Subtract with Carry
+    NOP = 0xEA, // No Operation
     LDY_imm = 0xA0,
     LDX_imm = 0xA2,
     LDA_imm = 0xA9, // Load Accumulator
-    CMP = 0xc9, // Compare
+    CPY_imm = 0xC0, // Compare Y Register
+    INY = 0xC8, // Increment Y Register
+    CMP = 0xC9, // Compare
     BNE = 0xD0, // Branch if Not Equal
     BCS = 0xB0, // Branch if Carry Set
     CLV = 0xB8, // Clear Overflow Flag
     CLD = 0xD8, // Clear Decimal Flag
+    CPX_imm = 0xE0, // Compare X Register
+    INX = 0xE8, // Increment X Register
     BEQ = 0xF0, // BEQ - Branch if Equal
     SED = 0xF8, // Set Decimal Flag
     _,
@@ -144,6 +152,8 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
         .PLP => {
             const value = pop_byte(cpu, memory);
             cpu.set_status_register_from_u8(value);
+            // The B bit is discarded
+            cpu.flags.b_flag = false;
         },
         .CLC => {
             cpu.flags.carry = false;
@@ -160,21 +170,74 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
             const lower = pop_byte(cpu, memory);
             const higher = pop_byte(cpu, memory);
             cpu.pc = combineTwoBytes(lower, higher);
-            cpu.pc +%= 1; // HACK dunno why I need this
+            cpu.pc +%= 1;
         },
         .BIT => {
             const address: u16 = @intCast(fetchByte(cpu, memory));
-            const anded_value = readByte(memory, address) & cpu.a;
+            const value = readByte(memory, address);
+            const anded_value = value & cpu.a;
             cpu.flags.zero = anded_value == 0;
-            cpu.flags.overflow = anded_value & 0b0100_0000 != 0;
-            cpu.flags.negative = anded_value & 0b1000_0000 != 0;
+            cpu.flags.overflow = value & 0b0100_0000 != 0;
+            cpu.flags.negative = value & 0b1000_0000 != 0;
         },
+        // Arithmatic
+        .ADC => {
+            const operand: u16 = fetchByte(cpu, memory);
+            const result: u16 = @as(u16, cpu.a) + operand + @as(u16, @intFromBool(cpu.flags.carry));
+
+            const cpu_a_before = cpu.a;
+
+            cpu.a = @truncate(result);
+            cpu.flags.carry = result > 0xFF;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
+            cpu.flags.zero = cpu.a == 0;
+            // If the sign of both inputs is different from the sign of the result
+            cpu.flags.overflow = (operand ^ result) & (cpu_a_before ^ result) & 0b1000_0000 != 0;
+        },
+        .SBC => {
+            const operand: u16 = fetchByte(cpu, memory);
+            const result: u16 = @as(u16, cpu.a) -% operand - (1 -% @as(u16, @intFromBool(cpu.flags.carry)));
+
+            const cpu_a_before = cpu.a;
+
+            cpu.a = @truncate(result);
+            cpu.flags.carry = result <= 0xFF;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
+            cpu.flags.zero = cpu.a == 0;
+            // If the sign of both inputs is different from the sign of the result
+            cpu.flags.overflow = (operand ^ result) & (cpu_a_before ^ result) & 0b1000_0000 != 0;
+        },
+        .INX => {
+            cpu.x +%= 1;
+            cpu.flags.zero = cpu.x == 0;
+            cpu.flags.negative = cpu.x & 0b1000_0000 != 0;
+        },
+        .INY => {
+            cpu.y +%= 1;
+            cpu.flags.zero = cpu.y == 0;
+            cpu.flags.negative = cpu.y & 0b1000_0000 != 0;
+        },
+
+        // Logic operations
         .AND => {
             const value = fetchByte(cpu, memory);
             cpu.a &= value;
             cpu.flags.zero = cpu.a == 0;
             cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
         },
+        .ORA => {
+            const value = fetchByte(cpu, memory);
+            cpu.a |= value;
+            cpu.flags.zero = cpu.a == 0;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
+        },
+        .EOR => {
+            const value = fetchByte(cpu, memory);
+            cpu.a ^= value;
+            cpu.flags.zero = cpu.a == 0;
+            cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
+        },
+
         .SEC => {
             cpu.flags.carry = true;
         },
@@ -218,11 +281,25 @@ pub fn execute(cpu: *Cpu, memory: []u8) !void {
             cpu.flags.zero = cpu.a == 0;
             cpu.flags.negative = cpu.a & 0b1000_0000 != 0;
         },
+
+        // Compare
         .CMP => {
             const immediate_value = fetchByte(cpu, memory);
             cpu.flags.carry = cpu.a >= immediate_value;
             cpu.flags.zero = cpu.a == immediate_value;
-            cpu.flags.negative = (cpu.a - immediate_value) & 0b1000_0000 != 0;
+            cpu.flags.negative = (cpu.a -% immediate_value) & 0b1000_0000 != 0;
+        },
+        .CPX_imm => {
+            const immediate_value = fetchByte(cpu, memory);
+            cpu.flags.carry = cpu.x >= immediate_value;
+            cpu.flags.zero = cpu.x == immediate_value;
+            cpu.flags.negative = (cpu.x -% immediate_value) & 0b1000_0000 != 0;
+        },
+        .CPY_imm => {
+            const immediate_value = fetchByte(cpu, memory);
+            cpu.flags.carry = cpu.y >= immediate_value;
+            cpu.flags.zero = cpu.y == immediate_value;
+            cpu.flags.negative = (cpu.y -% immediate_value) & 0b1000_0000 != 0;
         },
 
         // Branches

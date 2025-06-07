@@ -106,10 +106,10 @@ test "nestest.nes" {
         }
 
         {
-            const p_pos = std.mem.indexOf(u8, line, "P:") orelse {
+            const p_pos = std.mem.indexOf(u8, line, " P:") orelse {
                 return error.ParseError;
             };
-            const expected_p = try std.fmt.parseInt(u8, line[p_pos + 2 .. p_pos + 4], 16);
+            const expected_p = try std.fmt.parseInt(u8, line[p_pos + 3 .. p_pos + 5], 16);
             std.testing.expectEqual(expected_p, cpu.status_register_u8()) catch |e| {
                 std.log.err(
                     "line: {} expected P: {X:04} found: {X:04}\n",
